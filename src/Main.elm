@@ -387,7 +387,7 @@ viewDataPoint model duration =
                 , span [ class "text-sm" ] [ text (unitToAbbreviation unit) ]
                 ]
     in
-    div [ class "mb-2" ] <| diffToString model viewDataPointText (Debug.log "Duration" duration)
+    div [ class "mb-2" ] <| diffToString model viewDataPointText duration
 
 
 

@@ -1,13 +1,18 @@
 port module Main exposing (Model, Msg(..), init, main, update, view)
 
 import Browser
+import DataPoint exposing (DataPoint)
+import DateTime
+import Duration exposing (Duration)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onCheck, onClick)
 import Http exposing (Error(..))
 import Json.Decode as Decode exposing (Value)
+import Math
 import Task
 import Time
+import Unit
 
 
 
@@ -29,153 +34,12 @@ type alias Flags =
     Value
 
 
-type alias DataPoint =
-    { time : Time.Posix
-    }
-
-
 type alias Model =
     { dataPoints : List DataPoint
     , timeZone : Maybe Time.Zone
     , allVisible : Bool
     , simple : Bool
     }
-
-
-type alias Duration =
-    { raw : Int
-    , milli : Int
-    , seconds : Int
-    , minutes : Int
-    , hours : Int
-    , days : Int
-    }
-
-
-type Unit
-    = Millisecond
-    | Second
-    | Minute
-    | Hour
-    | Day
-
-
-dayInMs : Int
-dayInMs =
-    hourInMs * 24
-
-
-hourInMs : Int
-hourInMs =
-    minuteInMs * 60
-
-
-minuteInMs : Int
-minuteInMs =
-    secondInMs * 60
-
-
-secondInMs : Int
-secondInMs =
-    1000
-
-
-unitToAbbreviation : Unit -> String
-unitToAbbreviation unit =
-    case unit of
-        Millisecond ->
-            "ms"
-
-        Second ->
-            "sec"
-
-        Minute ->
-            "min"
-
-        Hour ->
-            "hrs"
-
-        Day ->
-            "days"
-
-
-toDuration : Int -> Duration
-toDuration diff =
-    let
-        days =
-            diff // dayInMs
-
-        hours =
-            (diff - days * dayInMs) // hourInMs
-
-        minutes =
-            (diff - days * dayInMs - hours * hourInMs) // minuteInMs
-
-        seconds =
-            (diff - days * dayInMs - hours * hourInMs - minutes * minuteInMs) // secondInMs
-
-        milli =
-            diff - days * dayInMs - hours * hourInMs - minutes * minuteInMs - seconds * secondInMs
-    in
-    { raw = diff
-    , milli = milli
-    , seconds = seconds
-    , minutes = minutes
-    , hours = hours
-    , days = days
-    }
-
-
-durationToInt : Duration -> Int
-durationToInt { milli, seconds, minutes, hours, days } =
-    milli + seconds * secondInMs + minutes * minuteInMs + hours * hourInMs + days * dayInMs
-
-
-dataPointDiff : DataPoint -> DataPoint -> Int
-dataPointDiff left right =
-    let
-        leftInt =
-            Time.posixToMillis left.time
-
-        rightInt =
-            Time.posixToMillis right.time
-    in
-    leftInt - rightInt
-
-
-diffToString : Model -> (Int -> Unit -> a) -> Duration -> List a
-diffToString model function duration =
-    let
-        parts =
-            [ ( duration.days, Day )
-            , ( duration.hours, Hour )
-            , ( duration.minutes, Minute )
-            , ( duration.seconds, Second )
-            , ( duration.milli, Millisecond )
-            ]
-
-        highest units =
-            case units of
-                ( value, unit ) :: rest ->
-                    if value > 0 then
-                        [ function value unit ]
-
-                    else
-                        highest rest
-
-                _ ->
-                    []
-
-        allParts =
-            parts
-                |> List.filter (\( value, _ ) -> value > 0)
-                |> List.map (\( value, unit ) -> function value unit)
-    in
-    if model.simple then
-        highest parts
-
-    else
-        allParts
 
 
 init : Flags -> ( Model, Cmd Msg )
@@ -195,18 +59,7 @@ init flags =
 
 decodeFlags : Flags -> List DataPoint
 decodeFlags flags =
-    let
-        decodeMillis millis =
-            Decode.map DataPoint (Decode.succeed (Time.millisToPosix millis))
-
-        dataPointDecoder =
-            Decode.int
-                |> Decode.andThen decodeMillis
-
-        decoder =
-            Decode.list dataPointDecoder
-    in
-    case Decode.decodeValue decoder flags of
+    case Decode.decodeValue (Decode.list DataPoint.decoder) flags of
         Ok dataPoints ->
             dataPoints
 
@@ -286,9 +139,9 @@ view model =
     case model.timeZone of
         Just timeZone ->
             div [ class "container px-1" ]
-                [ div [ class "text-right" ]
-                    [ label [ class "mr-2" ] [ text "Simple", input [ class "ml-1", type_ "checkbox", checked model.simple, onCheck ToggleSimple ] [] ]
-                    , button [ class "bg-white text-purple-800 px-2 py-1 rounded-md", onClick Reset ] [ text "reset" ]
+                [ div [ class "flex space-between" ]
+                    [ div [ class "flex flex-1" ] [ label [ class "mr-2" ] [ text "Simple", input [ class "ml-1", type_ "checkbox", checked model.simple, onCheck ToggleSimple ] [] ] ]
+                    , div [ class "flex flex-1 justify-end" ] [ button [ class "bg-white text-purple-800 px-2 py-1 rounded-md", onClick Reset ] [ text "reset" ] ]
                     ]
                 , div [ class "flex flex-col items-center" ]
                     [ div [ class "py-8" ] [ button [ onClick Record, class "w-36 h-36 bg-purple-800 rounded-full text-white text-2xl" ] [ text "Tap" ] ]
@@ -300,23 +153,13 @@ view model =
             div [] [ text "Loading" ]
 
 
-viewBar : Int -> Int -> Html Msg
-viewBar maximum current =
-    let
-        percent =
-            current // maximum
-    in
-    div [ class "w-full bg-gray-200 rounded-full h-2.5 mb-4 dark:bg-gray-700" ]
-        [ div [ class "bg-blue-600 h-2.5 rounded-full dark:bg-blue-500", style "width" (String.fromInt percent ++ "%") ] [] ]
-
-
 reduceDurations : (Duration -> a -> a) -> a -> List DataPoint -> a
 reduceDurations function initial records =
     let
         reduceFunction next acc =
             case next of
                 left :: (right :: rest) ->
-                    reduceFunction (right :: rest) (function (toDuration (dataPointDiff left right)) acc)
+                    reduceFunction (right :: rest) (function (Duration.fromDataPoints left right) acc)
 
                 _ ->
                     acc
@@ -336,23 +179,25 @@ viewDataPoints : Model -> List DataPoint -> Html Msg
 viewDataPoints model dataPoints =
     let
         viewDataPointDiff records acc =
-            reduceDurations (\duration innerAcc -> viewDataPoint model duration :: innerAcc) acc records
+            reduceDurations (\duration innerAcc -> viewDurationRow duration :: innerAcc) acc records
 
         average records =
-            let
-                durations =
-                    reduceDurations (\duration acc -> durationToInt duration :: acc) [] records
-            in
-            durations
-                |> List.foldl (+) 0
-                |> (\sum -> sum // List.length durations)
-                |> toDuration
+            records
+                |> reduceDurations (\duration acc -> Duration.toInt duration :: acc) []
+                |> Math.average
+                |> Duration.fromInt
                 |> viewDataPoint model
 
         statBlock title value =
-            div [ class "flex flex-1 flex-col text-center" ]
+            div [ class "flex flex-1 flex-col text-center py-3 bg-white m-2 rounded-md shadow-md" ]
                 [ div [ class "text-gray-500" ] [ text title ]
                 , div [ class "text-lg" ] value
+                ]
+
+        viewDurationRow duration =
+            div [ class "py-1 pl-1 mb-1 shadow-sm rounded-md flex space-between odd:bg-white even:bg-gray-100 border border-gray-400" ]
+                [ div [ class "flex flex-1 text-gray-500 italic" ] [ viewDataPointDate model duration ]
+                , div [ class "flex flex-1 justify-end" ] [ viewDataPoint model duration ]
                 ]
     in
     case dataPoints of
@@ -370,12 +215,29 @@ viewDataPoints model dataPoints =
                             ++ String.fromInt (List.length dataPoints)
                             ++ ")"
                         )
-                        (viewDataPointDiff [ first, second ] [])
+                        (reduceDurations (\duration innerAcc -> viewDataPoint model duration :: innerAcc) [] [ first, second ])
                     , statBlock "10 avg." [ dataPoints |> List.take 10 |> average ]
                     , statBlock "50 avg." [ dataPoints |> List.take 50 |> average ]
                     ]
                 , div [ class "text-right" ] (viewDataPointDiff (List.take 100 dataPoints) [] |> List.reverse)
                 ]
+
+
+viewDataPointDate : Model -> Duration -> Html Msg
+viewDataPointDate model duration =
+    let
+        timeZone =
+            Maybe.withDefault Time.utc model.timeZone
+
+        formatDateTime dateTime =
+            Math.ordinalize dateTime.day ++ " " ++ DateTime.monthToString dateTime.month ++ " " ++ DateTime.clockToString dateTime
+
+        formattedDateTime =
+            duration.end
+                |> Maybe.map (DateTime.fromPosix timeZone >> formatDateTime)
+                |> Maybe.withDefault ""
+    in
+    div [] [ text formattedDateTime ]
 
 
 viewDataPoint : Model -> Duration -> Html Msg
@@ -384,10 +246,13 @@ viewDataPoint model duration =
         viewDataPointText value unit =
             span [ class "mr-2" ]
                 [ span [ class "text-md mr-0.5" ] [ text (String.fromInt value) ]
-                , span [ class "text-sm" ] [ text (unitToAbbreviation unit) ]
+                , span [ class "text-sm text-gray-600" ] [ text (Unit.toAbbreviation unit) ]
                 ]
+
+        viewDiff =
+            Duration.diffToString { simple = model.simple } viewDataPointText duration
     in
-    div [ class "mb-2" ] <| diffToString model viewDataPointText duration
+    div [] viewDiff
 
 
 
